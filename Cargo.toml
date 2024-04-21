@@ -1,0 +1,17 @@
+[package]
+name = "inverted_index_concurrency"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[[bin]]
+name="create"
+path="src/bin/create.rs"
+
+[[bin]]
+name="search"
+path="src/bin/search.rs"
+
+[dependencies]
+byteorder = "1.5.0"
