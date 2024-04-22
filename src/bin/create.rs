@@ -162,6 +162,7 @@ fn start_index_writer_thread(
     let mut tmp_dir = TmpDir::new(output_dir);
     let handle = spawn(move || {
         for i in big_indexes {
+            println!("word count: {}", i.word_count);
             let file = write_index_to_tmp_file(i, &mut tmp_dir)?;
             if sender.send(file).is_err() {
                 break;
