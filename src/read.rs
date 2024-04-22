@@ -8,63 +8,10 @@ use byteorder::*;
 
 use byteorder::LittleEndian;
 
-/// File Memory Structure Diagram
-///
-/// +----------------------------------+-----------------------------------+
-/// |                               Header                                 |
-/// +----------------------------------+-----------------------------------+
-/// | Index Size (8 bytes)             | Document Size (8 bytes)           |
-/// +----------------------------------+-----------------------------------+
-/// |                                                                      |
-/// |                      Document Section                                |
-/// |----------------------------------------------------------------------|
-/// | Document 1 Data ...                                                  |
-/// |   - Document ID (4 bytes)                                            |
-/// |   - Path Length (8 bytes)                                            |
-/// |   - Path Data (variable length)                                      |
-/// | Document 2 Data ...                                                  |
-/// |   ...                                                                |
-/// | Document N Data ...                                                  |
-/// |   ...                                                                |
-/// +----------------------------------------------------------------------+
-/// |                                                                      |
-/// |                        Index Section                                 |
-/// |----------------------------------------------------------------------|
-/// | Index Entry 1 Data ...                                               |
-/// |   - Entry Data (variable length, based on term hits)                 |
-/// | Index Entry 2 Data ...                                               |
-/// |   ...                                                                |
-/// | Index Entry M Data ...                                               |
-/// |   ...                                                                |
-/// +----------------------------------------------------------------------+
-/// |                                                                      |
-/// |                      Contents Table Section                          |
-/// |----------------------------------------------------------------------|
-/// | Contents Entry 1 ...                                                 |
-/// |   - Offset (8 bytes)                                                 |
-/// |   - Length (8 bytes)                                                 |
-/// |   - Document Frequency (DF) (4 bytes)                                |
-/// |   - Term Length (4 bytes)                                            |
-/// |   - Term Data (variable length)                                      |
-/// | Contents Entry 2 ...                                                 |
-/// |   ...                                                                |
-/// | Contents Entry M ...                                                 |
-/// |   ...                                                                |
-/// +----------------------------------------------------------------------+
-///
-/// Description:
-/// - Header:
-///   - Index Size: Stores the size of the index section, allowing quick navigation to the index data.
-///   - Document Size: Stores the total size of the document section, helping in locating and managing document data within the file.
-/// - Document Section:
-///   - Contains serialized document data including unique identifiers and paths for each document.
-/// - Index Section:
-///   - Contains the main data entries for the index, stored consecutively. Each entry's length may vary depending on the actual data.
-/// - Contents Table Section:
-///   - Provides metadata for quick access to index entries, including offsets and lengths, document frequency, and terms associated with each entry.
+use crate::write::IndexFileWriter;
 
 pub struct IndexFileReader {
-    main: BufReader<File>,
+    pub main: BufReader<File>,
     contents: BufReader<File>,
     next: Option<Entry>,
 }
@@ -77,12 +24,20 @@ pub struct Entry {
 }
 
 impl IndexFileReader {
-    pub fn open_and_delete<P: AsRef<Path>>(filename: P) -> io::Result<IndexFileReader> {
+    pub fn open_and_delete<P: AsRef<Path>>(
+        filename: P,
+        delete: bool,
+    ) -> io::Result<IndexFileReader> {
+        let filename = filename.as_ref();
         let mut main_raw = File::open(filename)?;
 
         // header
-        let document_size = main_raw.read_u64::<LittleEndian>()?;
         let contents_offset = main_raw.read_u64::<LittleEndian>()?;
+        println!(
+            "opened {}, table of contents starts at {}",
+            filename.display(),
+            contents_offset
+        );
 
         let mut contents_raw = File::open(filename)?;
         contents_raw.seek(SeekFrom::Start(contents_offset))?;
@@ -90,7 +45,10 @@ impl IndexFileReader {
         let mut contents = BufReader::new(contents_raw);
 
         let first = IndexFileReader::read_entry(&mut contents)?;
-        fs::remove_file(filename)?;
+
+        if delete {
+            fs::remove_file(filename)?;
+        }
 
         Ok(IndexFileReader {
             main,
@@ -114,8 +72,7 @@ impl IndexFileReader {
         let nbytes = f.read_u64::<LittleEndian>()?;
         let df = f.read_u32::<LittleEndian>()?;
         let term_len = f.read_u32::<LittleEndian>()? as usize;
-        let mut bytes = Vec::with_capacity(term_len);
-        bytes.resize(term_len, 0);
+        let mut bytes = vec![0; term_len];
         f.read_exact(&mut bytes)?;
         let term = match String::from_utf8(bytes) {
             Ok(s) => s,
@@ -128,5 +85,46 @@ impl IndexFileReader {
             offset,
             nbytes,
         }))
+    }
+
+    pub fn peek(&self) -> Option<&Entry> {
+        self.next.as_ref()
+    }
+
+    pub fn iter_next_entry(&mut self) -> Option<Entry> {
+        let res = self.next.take();
+        if let Ok(n) = Self::read_entry(&mut self.contents) {
+            self.next = n
+        }
+        res
+    }
+
+    pub fn is_at(&self, term: &str) -> bool {
+        match self.next {
+            Some(ref e) => e.term == term,
+            None => false,
+        }
+    }
+
+    pub fn move_entry_to(&mut self, out: &mut IndexFileWriter) -> io::Result<()> {
+        {
+            let e = self.next.as_ref();
+            if e.is_none() {
+                return Err(io::Error::new(io::ErrorKind::Other, "no entry to move"));
+            }
+            let e = e.unwrap();
+            if e.nbytes > usize::max_value() as u64 {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "computer not big enough to hold index entry",
+                ));
+            }
+            let mut buf = vec![0; e.nbytes as usize];
+            self.main.read_exact(&mut buf)?;
+            out.write_main(&buf)?;
+        }
+
+        self.next = Self::read_entry(&mut self.contents)?;
+        Ok(())
     }
 }

@@ -4,9 +4,18 @@
 //! `InMemoryIndex` can be used to do that, up to the size of the machine's
 //! memory.
 
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    ffi::OsString,
+    io::{self, Cursor, Read, Seek},
+    os::unix::ffi::OsStringExt,
+    path::{Path, PathBuf},
+    vec,
+};
 
-use byteorder::*; // Requires using it to use methods such as write_u32::<LittleEndian>
+use byteorder::*;
+
+use crate::read::IndexFileReader;
 
 /// Break a string into words.
 fn tokenize(text: &str) -> Vec<&str> {
@@ -63,6 +72,61 @@ impl InMemoryIndex {
         }
     }
 
+    pub fn from_index_file<P: AsRef<Path>>(filename: P) -> io::Result<InMemoryIndex> {
+        let mut index = InMemoryIndex::new();
+        let mut reader = IndexFileReader::open_and_delete(filename, false)?;
+
+        while let Some(entry) = reader.iter_next_entry() {
+            if entry.term.is_empty() && entry.df == 0 {
+                // documents
+                reader.main.seek(io::SeekFrom::Start(entry.offset))?;
+                let doc_id = reader.main.read_u32::<LittleEndian>()?;
+                let path_len = reader.main.read_u64::<LittleEndian>()?;
+                let mut path = vec![0u8; path_len as usize];
+                reader.main.read_exact(&mut path)?;
+                index.docs.insert(
+                    doc_id,
+                    Document {
+                        id: doc_id,
+                        path: vec_to_pathbuf(path),
+                    },
+                );
+            } else {
+                // entrys
+                let mut hits = vec![];
+                reader.main.seek(io::SeekFrom::Start(entry.offset))?;
+                let mut data = vec![0u8; entry.nbytes as usize];
+                reader.main.read_exact(&mut data)?;
+                let mut cursor = Cursor::new(data);
+
+                let mut i = entry.df;
+                let mut has_hit = false;
+                let mut quit = false;
+
+                while i > 0 && !quit {
+                    let mut hit = vec![0u8; 4 + 4];
+                    loop {
+                        if let Ok(item) = cursor.read_u32::<LittleEndian>() {
+                            if item == 0 && has_hit {
+                                // the start of next hit
+                                hits.push(hit);
+                                i -= 1;
+                                vec![0u8; 4 + 4];
+                                break;
+                            }
+                            has_hit = true;
+                            hit.write_u32::<LittleEndian>(item).unwrap();
+                        } else {
+                            quit = true;
+                        }
+                    }
+                }
+                index.map.insert(entry.term, hits);
+            }
+        }
+        Ok(index)
+    }
+
     /// Index a single document.
     ///
     /// The resulting index contains exactly one `Hit` per term.
@@ -72,36 +136,33 @@ impl InMemoryIndex {
         let text_lowercase = text.to_lowercase();
         let tokens = tokenize(&text_lowercase);
         for (i, token) in tokens.iter().enumerate() {
-            // hits [0..3] -> document_id
-            // hits [4..7] -> token offset
             let hits = index.map.entry(token.to_string()).or_insert_with(|| {
-                let mut hits = Vec::with_capacity(4 + 4);
+                let mut hits = Vec::with_capacity(4 + 4 + 4);
+                const HITS_SEPERATOR: u32 = 0;
+                hits.write_u32::<LittleEndian>(HITS_SEPERATOR).unwrap();
                 hits.write_u32::<LittleEndian>(document_id).unwrap();
                 vec![hits]
             });
-            hits[0].write_u32::<LittleEndian>(i as u32).unwrap();
+            // start from 1, if read 0, means reach a Hits end.
+            hits[0].write_u32::<LittleEndian>((i + 1) as u32).unwrap();
             index.word_count += 1;
         }
 
-        if document_id % 100 == 0 {
-            println!(
-                "indexed document {}, {} bytes, {} words",
-                document_id,
-                &text.len(),
-                index.word_count
-            );
-        }
+        println!(
+            "indexed document {}:{:?}, {} bytes, {} words",
+            document_id,
+            &path,
+            &text.len(),
+            index.word_count
+        );
 
-        let _ = index
-            .docs
-            .insert(
-                document_id,
-                Document {
-                    id: document_id,
-                    path,
-                },
-            )
-            .unwrap();
+        let _ = index.docs.insert(
+            document_id,
+            Document {
+                id: document_id,
+                path,
+            },
+        );
 
         index
     }
@@ -137,4 +198,9 @@ impl Default for InMemoryIndex {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn vec_to_pathbuf(bytes: Vec<u8>) -> PathBuf {
+    let os_string = OsString::from_vec(bytes);
+    PathBuf::from(os_string)
 }

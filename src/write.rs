@@ -22,7 +22,7 @@ pub struct IndexFileWriter {
     contents_buf: Vec<u8>,
 }
 
-const HEADER_SIZE: u64 = 8 + 8;
+const HEADER_SIZE: u64 = 8;
 
 impl IndexFileWriter {
     /// Constructs a new `IndexFileWriter`.
@@ -36,8 +36,7 @@ impl IndexFileWriter {
     /// # Errors
     /// Returns an error if writing the initial header fails.
     pub fn new(mut f: BufWriter<File>) -> io::Result<IndexFileWriter> {
-        f.write_u64::<LittleEndian>(0)?; // docs size
-        f.write_u64::<LittleEndian>(0)?; // indexes size
+        f.write_u64::<LittleEndian>(0)?; // content start
         Ok(IndexFileWriter {
             offset: HEADER_SIZE,
             writer: f,
@@ -100,17 +99,15 @@ impl IndexFileWriter {
     /// It then updates the file header with the size of the document section and the starting
     /// position of the contents section, which are crucial for readers to correctly interpret the file data.
     /// The method ensures all data is flushed to disk and the file is left in a consistent state.
-    pub fn finish(mut self, documents_size: u64) -> io::Result<()> {
+    pub fn finish(mut self) -> io::Result<()> {
         let contents_start = self.offset;
         self.writer.write_all(&self.contents_buf)?;
         println!(
-            "{} bytes documents, {} bytes main, {} bytes total",
-            documents_size,
+            "{} bytes main, {} bytes total",
             contents_start,
             contents_start + self.contents_buf.len() as u64
         );
         self.writer.seek(SeekFrom::Start(0))?;
-        self.writer.write_u64::<LittleEndian>(documents_size)?;
         self.writer.write_u64::<LittleEndian>(contents_start)?;
         Ok(())
     }
@@ -126,13 +123,8 @@ pub fn write_index_to_tmp_file(index: InMemoryIndex, tmp_dir: &mut TmpDir) -> io
     let (filename, f) = tmp_dir.create()?;
     let mut writer = IndexFileWriter::new(f)?;
 
-    for (_, doc) in &index.docs {
-        writer.write_document(doc)?;
-    }
-    let document_size = writer.offset - HEADER_SIZE;
-
     let mut index_as_vec: Vec<_> = index.map.into_iter().collect();
-    index_as_vec.sort_by(|&(ref a, _), &(ref b, _)| a.cmp(b));
+    index_as_vec.sort_by(|(a, _), (b, _)| a.cmp(b));
 
     for (term, hits) in index_as_vec {
         let df = hits.len() as u32;
@@ -144,7 +136,15 @@ pub fn write_index_to_tmp_file(index: InMemoryIndex, tmp_dir: &mut TmpDir) -> io
         writer.write_contents_entry(term, df, start, stop - start);
     }
 
-    writer.finish(document_size)?;
+    // if term == "" && df == 0 { type = document }
+    for (_, doc) in index.docs {
+        let start = writer.offset;
+        writer.write_document(&doc)?;
+        let stop = writer.offset;
+        writer.write_contents_entry("".to_string(), 0, start, stop - start)
+    }
+
+    writer.finish()?;
     println!("wrote file {:?}", filename);
     Ok(filename)
 }

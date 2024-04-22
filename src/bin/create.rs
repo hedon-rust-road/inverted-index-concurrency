@@ -6,9 +6,53 @@ use std::{
     thread::{spawn, JoinHandle},
 };
 
+use argparse::{ArgumentParser, Collect, StoreTrue};
 use inverted_index_concurrency::{
-    index::InMemoryIndex, tmp::TmpDir, write::write_index_to_tmp_file,
+    index::InMemoryIndex, merge::FileMerge, tmp::TmpDir, write::write_index_to_tmp_file,
 };
+
+/// Create an inverted index for the given list of `documents`,
+/// storing it in the specified `output_dir`.
+fn run_single_threaded(documents: Vec<PathBuf>, output_dir: PathBuf) -> io::Result<()> {
+    // If all the documents fit comfortably in memory, we'll create the whole
+    // index in memory.
+    let mut accumulated_index = InMemoryIndex::new();
+
+    // If not, then as memory fills up, we'll write largeish temporary index
+    // files to disk, saving the temporary filenames in `merge` so that later we
+    // can merge them all into a single huge file.
+    let mut merge = FileMerge::new(&output_dir);
+
+    // A tool for generating temporary filenames.
+    let mut tmp_dir = TmpDir::new(&output_dir);
+
+    // For each document in the set...
+    for (doc_id, filename) in documents.into_iter().enumerate() {
+        // ...load it into memory...
+        let mut f = File::open(filename.clone())?;
+        let mut text = String::new();
+        f.read_to_string(&mut text)?;
+
+        // ...and add its contents to the in-memory `accumulated_index`.
+        // doc_id start from 1
+        let index = InMemoryIndex::from_single_document((doc_id + 1) as u32, filename, text);
+        accumulated_index.merge(index);
+        if accumulated_index.is_large() {
+            // To avoid running out of memory, dump `accumulated_index` to disk.
+            let file = write_index_to_tmp_file(accumulated_index, &mut tmp_dir)?;
+            merge.add_file(file)?;
+            accumulated_index = InMemoryIndex::new();
+        }
+    }
+
+    // Done reading documents! Save the last data set to disk, then merge the
+    // temporary index files if there are more than one.
+    if !accumulated_index.is_empty() {
+        let file = write_index_to_tmp_file(accumulated_index, &mut tmp_dir)?;
+        merge.add_file(file)?;
+    }
+    merge.finish()
+}
 
 /// Start a thread that loads documents from the filesystem into memory.
 ///
@@ -53,7 +97,8 @@ fn start_file_indexing_thread(
 
     let handler = spawn(move || {
         for (doc_id, (path, text)) in docs.into_iter().enumerate() {
-            let index = InMemoryIndex::from_single_document(doc_id as u32, path, text);
+            // doc_id start from 1
+            let index = InMemoryIndex::from_single_document((doc_id + 1) as u32, path, text);
             if sender.send(index).is_err() {
                 break;
             }
@@ -128,4 +173,97 @@ fn start_index_writer_thread(
     (receiver, handle)
 }
 
-fn main() {}
+fn merge_index_files(files: Receiver<PathBuf>, output_dir: &Path) -> io::Result<()> {
+    let mut merge = FileMerge::new(output_dir);
+    for file in files {
+        merge.add_file(file)?;
+    }
+    merge.finish()
+}
+
+fn run_pipeline(documents: Vec<PathBuf>, output_dir: PathBuf) -> io::Result<()> {
+    // Launch all five stages of the pipeline.
+    let (texts, h1) = start_file_reader_thread(documents);
+    let (pints, h2) = start_file_indexing_thread(texts);
+    let (gallons, h3) = start_in_memory_merge_thread(pints);
+    let (files, h4) = start_index_writer_thread(gallons, &output_dir);
+    let result = merge_index_files(files, &output_dir);
+
+    // Wait for threads to finish, holding on to any errors that they encounter.
+    let r1 = h1.join().unwrap();
+    h2.join().unwrap();
+    h3.join().unwrap();
+    let r4 = h4.join().unwrap();
+
+    // Return the first error encountered, if any.
+    // (As it happens, h2 and h3 can't fail: those threads
+    // are pure in-memory data processing.)
+    r1?;
+    r4?;
+    result
+}
+
+/// Given some paths, generate the complete list of text files to index. We check
+/// on disk whether the path is the name of a file or a directory; for
+/// directories, all .txt files immediately under the directory are indexed.
+/// Relative paths are fine.
+///
+/// It's an error if any of the `args` is not a valid path to an existing file
+/// or directory.
+fn expand_filename_arguments(args: Vec<String>) -> io::Result<Vec<PathBuf>> {
+    let mut filenames = vec![];
+    for arg in args {
+        let path = PathBuf::from(arg);
+        if path.metadata()?.is_dir() {
+            for entry in path.read_dir()? {
+                let entry = entry?;
+                if entry.file_type()?.is_file() {
+                    filenames.push(entry.path());
+                }
+            }
+        } else {
+            filenames.push(path);
+        }
+    }
+    Ok(filenames)
+}
+
+/// Generate an index for a bunch of text files.
+fn run(filenames: Vec<String>, single_threaded: bool) -> io::Result<()> {
+    let output_dir = PathBuf::from(".");
+    let documents = expand_filename_arguments(filenames)?;
+
+    if single_threaded {
+        run_single_threaded(documents, output_dir)
+    } else {
+        run_pipeline(documents, output_dir)
+    }
+}
+
+fn main() {
+    let mut single_threaded = false;
+    let mut filenames = vec![];
+
+    {
+        let mut ap = ArgumentParser::new();
+        ap.set_description("Make an inverted index for searching documents.");
+        ap.refer(&mut single_threaded).add_option(
+            &["-1", "--single-threaded"],
+            StoreTrue,
+            "Do all the work on a single thread.",
+        );
+        ap.refer(&mut filenames).add_argument(
+            "filenames",
+            Collect,
+            "Names of files/directories to index. \
+                           For directories, all .txt files immediately \
+                           under the directory are indexed.",
+        );
+        ap.parse_args_or_exit();
+    }
+
+    match run(filenames, single_threaded) {
+        Ok(()) => {}
+        Err(err) => println!("error: {}", err),
+    }
+}

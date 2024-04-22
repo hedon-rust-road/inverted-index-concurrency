@@ -14,4 +14,5 @@ name="search"
 path="src/bin/search.rs"
 
 [dependencies]
+argparse = "0.2.2"
 byteorder = "1.5.0"
