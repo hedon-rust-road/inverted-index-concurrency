@@ -152,11 +152,11 @@ impl InMemoryIndex {
         while let Some(entry) = reader.iter_next_entry() {
             if entry.term.is_empty() && entry.df == 0 {
                 // documents
-                reader.main.seek(io::SeekFrom::Start(entry.offset))?;
-                let doc_id = reader.main.read_u32::<LittleEndian>()?;
-                let path_len = reader.main.read_u64::<LittleEndian>()?;
+                reader.terms_docs.seek(io::SeekFrom::Start(entry.offset))?;
+                let doc_id = reader.terms_docs.read_u32::<LittleEndian>()?;
+                let path_len = reader.terms_docs.read_u64::<LittleEndian>()?;
                 let mut path = vec![0u8; path_len as usize];
-                reader.main.read_exact(&mut path)?;
+                reader.terms_docs.read_exact(&mut path)?;
                 index.docs.insert(
                     doc_id,
                     Document {
@@ -167,9 +167,9 @@ impl InMemoryIndex {
             } else {
                 // entrys
                 let mut hits = vec![];
-                reader.main.seek(io::SeekFrom::Start(entry.offset))?;
+                reader.terms_docs.seek(io::SeekFrom::Start(entry.offset))?;
                 let mut data = vec![0u8; entry.nbytes as usize];
-                reader.main.read_exact(&mut data)?;
+                reader.terms_docs.read_exact(&mut data)?;
                 let mut cursor = Cursor::new(data);
 
                 let mut i = entry.df;

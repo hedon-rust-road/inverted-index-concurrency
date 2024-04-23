@@ -158,9 +158,6 @@ fn merge_streams(files: Vec<PathBuf>, out: BufWriter<File>) -> io::Result<()> {
 
 /// Reverses the order of files and then merges them into one,
 /// updating the original list of filenames with the result.
-///
-/// This function is particularly useful when a specific order of merging is required
-/// that is not the natural order of the input files.
 fn merge_reversed(filenames: &mut Vec<PathBuf>, tmp_dir: &mut TmpDir) -> io::Result<()> {
     filenames.reverse();
     let (merge_filename, out) = tmp_dir.create()?;
