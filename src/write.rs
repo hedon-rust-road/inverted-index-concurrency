@@ -22,8 +22,6 @@ pub struct IndexFileWriter {
     contents_buf: Vec<u8>,
 }
 
-const HEADER_SIZE: u64 = 8;
-
 impl IndexFileWriter {
     /// Constructs a new `IndexFileWriter`.
     ///
@@ -36,6 +34,7 @@ impl IndexFileWriter {
     /// # Errors
     /// Returns an error if writing the initial header fails.
     pub fn new(mut f: BufWriter<File>) -> io::Result<IndexFileWriter> {
+        const HEADER_SIZE: u64 = 8;
         f.write_u64::<LittleEndian>(0)?; // content start
         Ok(IndexFileWriter {
             offset: HEADER_SIZE,
@@ -123,7 +122,7 @@ pub fn write_index_to_tmp_file(index: InMemoryIndex, tmp_dir: &mut TmpDir) -> io
     let (filename, f) = tmp_dir.create()?;
     let mut writer = IndexFileWriter::new(f)?;
 
-    let mut index_as_vec: Vec<_> = index.map.into_iter().collect();
+    let mut index_as_vec: Vec<_> = index.terms.into_iter().collect();
     index_as_vec.sort_by(|(a, _), (b, _)| a.cmp(b));
 
     for (term, hits) in index_as_vec {

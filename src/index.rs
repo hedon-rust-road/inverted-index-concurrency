@@ -44,7 +44,7 @@ pub struct InMemoryIndex {
     /// document id in increasing order. This is handy for some algorithms you
     /// might want to run on the index, so we preserve this property wherever
     /// possible.
-    pub map: HashMap<String, Vec<Hit>>,
+    pub terms: HashMap<String, Vec<Hit>>,
 
     pub docs: HashMap<u32, Document>,
 }
@@ -70,7 +70,7 @@ impl InMemoryIndex {
     pub fn new() -> InMemoryIndex {
         InMemoryIndex {
             word_count: 0,
-            map: HashMap::new(),
+            terms: HashMap::new(),
             docs: HashMap::new(),
         }
     }
@@ -84,7 +84,7 @@ impl InMemoryIndex {
         let text_lowercase = text.to_lowercase();
         let tokens = tokenize(&text_lowercase);
         for (token, start_pos, end_pos) in tokens.iter() {
-            let hits = index.map.entry(token.to_string()).or_insert_with(|| {
+            let hits = index.terms.entry(token.to_string()).or_insert_with(|| {
                 let mut hits = Vec::with_capacity(4 + 4 + 4);
                 hits.write_i32::<LittleEndian>(Self::HITS_SEPERATOR)
                     .unwrap();
@@ -124,8 +124,8 @@ impl InMemoryIndex {
     /// ids in `other` are greater than every document id in `*self`, then
     /// `*self` remains sorted by document id after merging.
     pub fn merge(&mut self, other: InMemoryIndex) {
-        for (term, hits) in other.map {
-            self.map.entry(term).or_default().extend(hits)
+        for (term, hits) in other.terms {
+            self.terms.entry(term).or_default().extend(hits)
         }
         self.word_count += other.word_count;
         self.docs.extend(other.docs);
@@ -200,7 +200,7 @@ impl InMemoryIndex {
                         }
                     }
                 }
-                index.map.insert(entry.term, hits);
+                index.terms.insert(entry.term, hits);
             }
         }
         index.word_count /= 2;
@@ -210,7 +210,7 @@ impl InMemoryIndex {
     // Search all documents that contain the term
     // and highlights where the term appears.
     pub fn search(&self, term: &str) -> io::Result<()> {
-        let m: Option<&Vec<Vec<u8>>> = self.map.get(term);
+        let m: Option<&Vec<Vec<u8>>> = self.terms.get(term);
         if m.is_none() {
             println!("can not found {} in all documents", term);
             return Ok(());

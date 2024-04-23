@@ -17,5 +17,5 @@ name="search"
 path="src/bin/search.rs"
 
 [dependencies]
-argparse = "0.2.2"
 byteorder = "1.5.0"
+clap = { version = "4.5.4", features = ["derive"] }
