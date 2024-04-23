@@ -98,7 +98,7 @@ fn start_file_indexing_thread(
     let handler = spawn(move || {
         for (doc_id, (path, text)) in docs.into_iter().enumerate() {
             // doc_id start from 1
-            let index = InMemoryIndex::from_single_document((doc_id + 1) as u32, path, text);
+            let index = InMemoryIndex::from_single_document(doc_id as u32, path, text);
             if sender.send(index).is_err() {
                 break;
             }

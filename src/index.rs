@@ -17,58 +17,7 @@ use byteorder::*;
 
 use crate::read::IndexFileReader;
 
-/// Break a string into words.
-// fn tokenize(text: &str) -> Vec<&str> {
-//     text.split(|ch: char| !ch.is_alphanumeric())
-//         .filter(|word| !word.is_empty())
-//         .collect()
-// }
-
-fn tokenize(text: &str) -> Vec<(&str, usize, usize)> {
-    let mut tokens = Vec::new();
-    let mut last_pos = 0; // 追踪上一个token的结束位置
-    let mut in_token = false;
-    let mut token_start = 0; // 当前token的起始位置
-
-    let char_vec: Vec<_> = text.char_indices().collect();
-
-    for (idx, ch) in char_vec.iter() {
-        if ch.is_alphanumeric() {
-            if !in_token {
-                token_start = *idx;
-                in_token = true;
-            }
-        } else {
-            if in_token {
-                // 保存当前token并重置状态
-                println!(
-                    "Token: '{}' starts at {} ends at {}",
-                    &text[token_start..*idx],
-                    token_start,
-                    *idx - 1
-                );
-                tokens.push((&text[token_start..*idx], token_start, *idx - 1));
-                in_token = false;
-            }
-        }
-        last_pos = *idx; // 更新最后位置
-    }
-
-    // 检查是否有token延伸到字符串末尾
-    if in_token {
-        println!(
-            "Token: '{}' starts at {} ends at {}",
-            &text[token_start..],
-            token_start,
-            last_pos
-        );
-        tokens.push((&text[token_start..], token_start, last_pos));
-    }
-
-    tokens
-}
-
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct TokenPos {
     pub start_pos: u32,
     pub end_pos: u32,
@@ -143,7 +92,6 @@ impl InMemoryIndex {
                 vec![hits]
             });
 
-            // start from 1, if read 0, means reach a Hits end.
             hits[0]
                 .write_u32::<LittleEndian>(*start_pos as u32)
                 .unwrap();
@@ -196,6 +144,7 @@ impl InMemoryIndex {
         self.word_count > REASONABLE_SIZE
     }
 
+    // Load an InMemoryIndex from an index file.
     pub fn from_index_file<P: AsRef<Path>>(filename: P) -> io::Result<InMemoryIndex> {
         let mut index = InMemoryIndex::new();
         let mut reader = IndexFileReader::open_and_delete(filename, false)?;
@@ -231,8 +180,8 @@ impl InMemoryIndex {
                     let mut hit = Vec::with_capacity(4 + 4 + 4); // cannot use vec![0;12]
                     loop {
                         if let Ok(item) = cursor.read_i32::<LittleEndian>() {
+                            // the start of next hit
                             if item == Self::HITS_SEPERATOR && has_hit {
-                                // the start of next hit
                                 hits.push(hit);
                                 i -= 1;
                                 index.word_count -= 2;
@@ -243,7 +192,7 @@ impl InMemoryIndex {
                             index.word_count += 1;
                         } else {
                             quit = true;
-                            if hit.len() > 0 {
+                            if !hit.is_empty() {
                                 hits.push(hit);
                                 index.word_count -= 2;
                             }
@@ -254,11 +203,12 @@ impl InMemoryIndex {
                 index.map.insert(entry.term, hits);
             }
         }
-
         index.word_count /= 2;
         Ok(index)
     }
 
+    // Search all documents that contain the term
+    // and highlights where the term appears.
     pub fn search(&self, term: &str) -> io::Result<()> {
         let m: Option<&Vec<Vec<u8>>> = self.map.get(term);
         if m.is_none() {
@@ -269,65 +219,87 @@ impl InMemoryIndex {
         for hit in hits {
             let mut cursor = Cursor::new(hit);
             let _ = cursor.read_i32::<LittleEndian>().unwrap();
+
             let document_id = cursor.read_u32::<LittleEndian>().unwrap();
             let doc = self.docs.get(&document_id);
             if doc.is_none() {
                 println!("cannot found document {}", document_id);
                 continue;
             }
+            let doc = doc.unwrap();
             let mut poss = Vec::with_capacity(hits.len() / 4);
-            let mut pos = TokenPos {
-                start_pos: 0,
-                end_pos: 0,
-            };
-
-            let mut i = 0;
+            let mut pos = TokenPos::default();
+            let mut has_pos = false;
             while let Ok(p) = cursor.read_u32::<LittleEndian>() {
-                if i == 0 {
+                if !has_pos {
                     pos.start_pos = p;
-                    i = 1;
+                    has_pos = true;
                 } else {
                     pos.end_pos = p;
                     poss.push(pos);
-                    pos = TokenPos {
-                        start_pos: 0,
-                        end_pos: 0,
-                    };
-                    i = 0;
+                    pos = TokenPos::default();
+                    has_pos = false;
                 }
             }
 
-            let result = highlight_file(doc.unwrap().path.clone(), &mut poss)?;
-
-            println!("{}", result);
+            let result = highlight_file(doc.path.clone(), &mut poss)?;
+            println!("\n{:?}: \n{}", doc.path, result);
         }
-
         Ok(())
     }
 }
 
-pub fn highlight_file(path: PathBuf, poss: &mut Vec<TokenPos>) -> io::Result<String> {
+impl Default for InMemoryIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Break text into words
+fn tokenize(text: &str) -> Vec<(&str, usize, usize)> {
+    let mut res = Vec::new();
+    let mut token_start = None;
+    for (idx, ch) in text.char_indices() {
+        match (ch.is_alphanumeric(), token_start) {
+            // start of a word
+            (true, None) => token_start = Some(idx),
+            // end of a word
+            (false, Some(start)) => {
+                res.push((&text[start..idx], start, idx - 1));
+                token_start = None
+            }
+            _ => {}
+        }
+    }
+
+    // the last one.
+    if let Some(start) = token_start {
+        res.push((&text[start..], start, text.len() - 1))
+    }
+    res
+}
+
+fn highlight_file(path: PathBuf, poss: &mut Vec<TokenPos>) -> io::Result<String> {
     let mut origin_text = std::fs::read_to_string(path)?;
     let mut extra_chars = 0;
-    // 确保位置按照start_pos排序，防止后续错位
+
+    // Make sure the poss is sorted by `start_pos` to prevent misalignment.
     poss.sort_by_key(|pos| pos.start_pos);
 
     for pos in poss.iter() {
-        // 调整位置索引，加上已插入的额外字符数
+        // Adjust the position index to add the number of additional characters that have been inserted.
         let start_pos_adjusted = (pos.start_pos as usize) + extra_chars;
         let end_pos_adjusted = (pos.end_pos as usize) + extra_chars;
 
-        // 执行高亮处理，并更新原始文本
         origin_text = highlight_text(&origin_text, start_pos_adjusted, end_pos_adjusted);
 
-        // 更新已插入的额外字符数（ANSI codes长度）
-        extra_chars += 9; // "\x1b[31m" 和 "\x1b[0m" 的总长度
+        extra_chars += 9; // the total length of `\x1b[31m` and `\x1b[0m`
     }
 
     Ok(origin_text)
 }
 
-pub fn highlight_text(text: &str, start_pos: usize, end_pos: usize) -> String {
+fn highlight_text(text: &str, start_pos: usize, end_pos: usize) -> String {
     if start_pos > text.len() || end_pos >= text.len() || start_pos > end_pos {
         return text.to_string(); // Returning the original text if the positions are invalid
     }
@@ -339,12 +311,6 @@ pub fn highlight_text(text: &str, start_pos: usize, end_pos: usize) -> String {
         &text[start_pos..=end_pos], // Text to be highlighted
         &text[end_pos + 1..]        // Text after the highlight
     )
-}
-
-impl Default for InMemoryIndex {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 fn vec_to_pathbuf(bytes: Vec<u8>) -> PathBuf {
