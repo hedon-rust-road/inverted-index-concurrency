@@ -7,9 +7,17 @@ use std::{
 
 use crate::{read::IndexFileReader, tmp::TmpDir, write::IndexFileWriter};
 
+/// Represents a merging tool for combining multiple index files into a single file.
+/// It uses a multi-level merging strategy to handle large numbers of files efficiently.
 pub struct FileMerge {
+    /// Directory where the final merged file will be stored.
     output_dir: PathBuf,
+
+    /// Temporary directory used for intermediate files during the merge process.
     tmp_dir: TmpDir,
+
+    /// A vector of stacks, each containing files at different levels of merging.
+    /// Each inner vector represents a level in the multi-level merge process.
     stacks: Vec<Vec<PathBuf>>,
 }
 
@@ -28,16 +36,26 @@ impl FileMerge {
         }
     }
 
+    /// Adds a file to the merge process.
+    /// Files are added to a multi-level stack structure
+    /// where they are progressively merged with other files.
     pub fn add_file(&mut self, mut file: PathBuf) -> io::Result<()> {
         let mut level = 0;
         loop {
+            // Ensure the current level exists in the stacks vector.
             if level == self.stacks.len() {
                 self.stacks.push(vec![]);
             }
+
+            // Add the file to the current level.
             self.stacks[level].push(file);
+
+            // Merge files at this level if the stack is full.
             if self.stacks[level].len() < NSTREAMS {
                 break;
             }
+
+            // Create a new file to store the merged result and update the stack.
             let (filename, out) = self.tmp_dir.create()?;
             let mut to_merge = vec![];
             mem::swap(&mut self.stacks[level], &mut to_merge);
@@ -48,6 +66,8 @@ impl FileMerge {
         Ok(())
     }
 
+    /// Completes the merge process by merging all remaining files.
+    /// This method should be called after all files have been added.
     pub fn finish(mut self) -> io::Result<()> {
         let mut tmp = Vec::with_capacity(NSTREAMS);
         for stack in self.stacks {
@@ -72,6 +92,13 @@ impl FileMerge {
         }
     }
 }
+
+/// Merges multiple index files into a single output file.
+/// This function reads through all the provided index files,
+/// combines their contents based on the lexicographical order of index terms,
+/// and writes the merged output to a new file.
+///
+/// It uses a multi-way merge algorithm, similar to that used in merge sort, to efficiently combine the files.
 fn merge_streams(files: Vec<PathBuf>, out: BufWriter<File>) -> io::Result<()> {
     let mut streams: Vec<IndexFileReader> = files
         .into_iter()
@@ -129,6 +156,11 @@ fn merge_streams(files: Vec<PathBuf>, out: BufWriter<File>) -> io::Result<()> {
     Ok(())
 }
 
+/// Reverses the order of files and then merges them into one,
+/// updating the original list of filenames with the result.
+///
+/// This function is particularly useful when a specific order of merging is required
+/// that is not the natural order of the input files.
 fn merge_reversed(filenames: &mut Vec<PathBuf>, tmp_dir: &mut TmpDir) -> io::Result<()> {
     filenames.reverse();
     let (merge_filename, out) = tmp_dir.create()?;
