@@ -80,7 +80,7 @@ cargo run --bin search -- -i index.bat -t programming
 
 Output example:
 
-![search output example](https://hedonspace.oss-cn-beijing.aliyuncs.com/img/image-20240423234407840.png)
+![search output example](./imgs/search-ouput-example.png)
 
 ## Code Overview
 
